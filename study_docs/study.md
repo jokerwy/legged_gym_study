@@ -213,12 +213,12 @@ obs (4096, 48) ──actor──> actions (4096, 12) ──env.step──> rewar
 
 | 你学过的公式 | 代码位置（自己去定位） |
 |---|---|
-| 概率比 $r_t = \pi_\theta/\pi_{\theta_{old}}$ | `actions_log_prob - old_actions_log_prob` 再 `exp()` |
-| clip 目标 $\min(rA, \text{clip}(r,1\pm\epsilon)A)$ | 本实现最小化负目标：`torch.max(surrogate, surrogate_clipped)` |
-| 熵奖励 $\beta H(\pi)$ | `entropy_batch.mean()` |
+| 概率比 r = π_新 / π_旧 | `actions_log_prob - old_actions_log_prob` 再 `exp()` |
+| clip 目标 min(r·A, clip(r, 1±ε)·A) | 本实现最小化负目标：`torch.max(surrogate, surrogate_clipped)` |
+| 熵奖励 β·H(π) | `entropy_batch.mean()` |
 | value loss（MSE 或 clip 版） | `value_loss = ...` |
 | 自适应学习率（KL 触发） | `if kl_mean > desired_kl * 2.0 ...` |
-| GAE $\hat A_t = \sum (\gamma\lambda)^l \delta_{t+l}$ | `compute_returns()`（约第 116 行） |
+| GAE Â_t = Σ_l (γλ)^l · δ_{t+l} | `compute_returns()`（约第 116 行） |
 
 **关键思考题**（面试高频，务必能答）：
 
@@ -250,7 +250,7 @@ obs (4096, 48) ──actor──> actions (4096, 12) ──env.step──> rewar
 
 - [ ] 能脱稿讲清 PPO 一次 update 的完整计算过程（storage → GAE → minibatch → 三个 loss → 自适应 lr）
 - [ ] 能区分基类 PD 路径与 ANYmal 执行器网络路径，讲清动作缩放、控制频率及力矩限幅位置
-- [ ] 能解释 GAE 中 $\lambda=0.95$ 时偏差/方差的权衡
+- [ ] 能解释 GAE 中 λ=0.95 时偏差/方差的权衡
 
 ---
 
@@ -528,16 +528,16 @@ Actor 实现 `obs → action`；Critic 用于构造训练优势和价值目标�
 
 **Q2：`use_clipped_value_loss` 干什么？为什么 clip value？**
 
-令 $V_{old}$ 是采样时的价值，$R$ 是固定回报目标：
+令 V_old 是采样时的旧价值，R 是固定回报目标：
 
-$$V_{clip}=V_{old}+\operatorname{clip}(V_\theta-V_{old},-\epsilon,\epsilon)$$
-$$L_V=\mathbb E[\max((V_\theta-R)^2,(V_{clip}-R)^2)]$$
+    V_clip = V_old + clip(V_新 − V_old, −ε, +ε)
+    L_V = E[ max( (V_新 − R)², (V_clip − R)² ) ]
 
 这样避免 Critic 因同一批数据多次更新而过度改变估值；关闭则使用普通 MSE。这里裁剪的是**相对旧价值的变化**，不是把价值强制限制在 `[-0.2, 0.2]`；也不是硬保证新价值变化不超过阈值。本实现复用 `clip_param`，数值意义受奖励尺度影响，奖励改变很大时可能让 Critic 适应偏慢。
 
 **Q3：为什么以 KL 为自适应学习率信号？KL 大说明什么？**
 
-KL 测量在本批观测上旧/新动作分布的偏离，比参数距离更贴近行为变化。本实现用对角高斯解析式计算 $D_{KL}(\pi_{old}\Vert\pi_{new})$ 的 batch 均值：大于 `2 * desired_kl` 就把 lr 除以 1.5，低于一半且大于零则乘 1.5，限制在 `[1e-5, 1e-2]`。KL 大意味着更新可能过猛、旧数据与新策略不够接近，**不等于已证明任务性能下降**。这是启发式调速，不是 TRPO 的严格约束，也不是 KL early stopping。
+KL 测量在本批观测上旧/新动作分布的偏离，比参数距离更贴近行为变化。本实现用对角高斯解析式计算 D_KL(π_old ‖ π_new) 的 batch 均值：大于 `2 * desired_kl` 就把 lr 除以 1.5，低于一半且大于零则乘 1.5，限制在 `[1e-5, 1e-2]`。KL 大意味着更新可能过猛、旧数据与新策略不够接近，**不等于已证明任务性能下降**。这是启发式调速，不是 TRPO 的严格约束，也不是 KL early stopping。
 
 **Q4：为什么采完数据后 `old_actions_log_prob` 不能变化？**
 
@@ -553,17 +553,17 @@ KL 测量在本批观测上旧/新动作分布的偏离，比参数距离更贴�
 4. `loss = surrogate_loss + value_loss_coef * value_loss - entropy_coef * entropy.mean()`。
 5. `zero_grad → backward → clip_grad_norm_ → optimizer.step`，最后清空 storage。
 
-clip 的“保守”来自对有利方向的收益截断：$A>0$ 时不再奖励过大的 ratio，$A<0$ 时不再奖励过小的 ratio。它**不直接裁剪动作、不直接限制每个参数，也不能保证 KL 总不超标**。
+clip 的“保守”来自对有利方向的收益截断：A>0 时不再奖励过大的 ratio，A<0 时不再奖励过小的 ratio。它**不直接裁剪动作、不直接限制每个参数，也不能保证 KL 总不超标**。
 
 **Q6：GAE、γ、λ、优势归一化各解决什么问题？**
 
-$$\delta_t=r_t+\gamma(1-d_t)V(s_{t+1})-V(s_t)$$
-$$\hat A_t=\delta_t+\gamma\lambda(1-d_t)\hat A_{t+1},\qquad R_t=\hat A_t+V(s_t)$$
+    δ_t = r_t + γ·(1 − d_t)·V(s_{t+1}) − V(s_t)
+    Â_t = δ_t + γ·λ·(1 − d_t)·Â_{t+1}，  R_t = Â_t + V(s_t)
 
 - `γ` 控制未来奖励折扣，也会影响任务目标；越接近 1，关注的未来越远，估计通常更难。
 - `λ` 混合不同长度 TD 估计。接近 0 更依赖 Critic，通常低方差、高偏差；接近 1 更接近长程回报，通常高方差、低 bootstrap 偏差。`λ=0.95` 是常用折中，不是普适最优。
 - 优势表示“比基线好多少”，有助降低梯度方差。`compute_returns()` 中对**整轮 rollout**执行 `(A - mean) / (std + 1e-8)`，稳定 Actor 更新尺度；不是把 Critic 的回报也归一化，不保证所有奖励尺度问题消失。
-- 真正终止不 bootstrap；时间截断应保留未完成任务的价值。当前旧实现 `process_env_step()` 用 `transition.values` 补 timeout 奖励，即采样当前状态的 $V(s_t)$，**不能把它说成精确使用终止前的 $V(s_{t+1})$**。严格处理需额外保存 terminal observation，避免拿自动 reset 后的观测估值。
+- 真正终止不 bootstrap；时间截断应保留未完成任务的价值。当前旧实现 `process_env_step()` 用 `transition.values` 补 timeout 奖励，即采样当前状态的 V(s_t)，**不能把它说成精确使用终止前的 V(s_{t+1})**。严格处理需额外保存 terminal observation，避免拿自动 reset 后的观测估值。
 
 ### 9.3 阶段二：环境 MDP 四要素
 
@@ -583,9 +583,9 @@ $$\hat A_t=\delta_t+\gamma\lambda(1-d_t)\hat A_{t+1},\qquad R_t=\hat A_t+V(s_t)$
 
 **Q2：动作为什么是关节角偏移？如何变成力矩？**
 
-12 维动作对应 12 个驱动关节，目标为 $q_{des}=q_{default}+s_a a$。位置目标更接近底层关节控制接口，利用已有伺服控制，通常比让策略从零学习直接力矩更易稳定，但仍依赖执行器模型准确性。
+12 维动作对应 12 个驱动关节，目标为 q_des = q_default + s_a·a。位置目标更接近底层关节控制接口，利用已有伺服控制，通常比让策略从零学习直接力矩更易稳定，但仍依赖执行器模型准确性。
 
-- **基类/A1 的 P 路径**：采样动作 → `clip_actions` → `action_scale` → $\tau=K_p(q_{des}-q)-K_d\dot q$ → 按 URDF 力矩上限裁剪 → 施加仿真力矩。
+- **基类/A1 的 P 路径**：采样动作 → `clip_actions` → `action_scale` → τ = Kp·(q_des − q) − Kd·q̇ → 按 URDF 力矩上限裁剪 → 施加仿真力矩。
 - **当前 ANYmal 的默认路径**：注册的是 `Anymal` 子类，继承 `use_actuator_network=True`。`/home/lixiang/AI Study/RL/legged_gym_study/legged_gym/envs/anymal_c/anymal.py` 重写 `_compute_torques()`，把位置误差和关节速度送进预训练 LSTM 执行器网络输出力矩，**不是直接使用上面的 PD 公式**。该分支返回前没有基类的显式 `torch.clip`，不能照搬“所有路径都有力矩 clip”的结论，部署必须另设安全限幅。
 - 默认仿真 `dt=0.005s`、`decimation=4`，策略周期为 0.02s（50Hz），物理/力矩计算 200Hz。同一动作保持 4 个仿真步，每个物理步重新计算力矩。不是每个物理步都重新采样策略动作。
 
@@ -665,7 +665,7 @@ $$\hat A_t=\delta_t+\gamma\lambda(1-d_t)\hat A_{t+1},\qquad R_t=\hat A_t+V(s_t)$
 
 摩擦随机化改变足底接触条件；质量随机化改变基座附加质量、运动响应与负载；push 在代码中是**覆盖基座 xy 速度**模拟瞬时扰动，并不是持续施加某个牛顿数的外力。摩擦/质量通常建环境时采样，不应说每个物理步都重采样；push 按时间触发，观测噪声则按步加入。
 
-可理解为优化 $\mathbb E_{\phi\sim p(\phi)}[J(\pi;\phi)]$，逼策略在一组环境参数下都取得可接受表现，降低对单一仿真器参数的过拟合。类似数据增强的共同点是增加训练分布多样性；不同点是 RL 中随机化动力学还改变状态转移、接触及未来轨迹，不只是变换静态输入。它通常改善**所覆盖范围附近**的鲁棒性，不保证任意 OOD 泛化，也不等于优化最坏工况安全性。范围过大还可能使任务不可学，需标定合理范围和随机化课程。
+可理解为优化 E_{φ~p(φ)}[ J(π; φ) ]（对环境参数 φ 求期望回报），逼策略在一组环境参数下都取得可接受表现，降低对单一仿真器参数的过拟合。类似数据增强的共同点是增加训练分布多样性；不同点是 RL 中随机化动力学还改变状态转移、接触及未来轨迹，不只是变换静态输入。它通常改善**所覆盖范围附近**的鲁棒性，不保证任意 OOD 泛化，也不等于优化最坏工况安全性。范围过大还可能使任务不可学，需标定合理范围和随机化课程。
 
 **Q5：失败训练怎么诊断？能凭曲线截图秒判吗？**
 
@@ -686,7 +686,7 @@ $$\hat A_t=\delta_t+\gamma\lambda(1-d_t)\hat A_{t+1},\qquad R_t=\hat A_t+V(s_t)$
 
 **Q1：如何新增足端滑移奖励？**
 
-定义 $p_{slip}=\sum_{foot}\mathbf 1[F_z>1N]\|v^{world}_{foot,xy}\|^2$，函数返回 `[num_envs]` 的非负惩罚量，配置用负权重。静止地面下应惩罚**足端相对地面的世界系速度**，不要误减基座速度；移动平台需减平台速度。当前基类没有保存足端 rigid-body 速度，不能直接假设已有 `self.feet_vel`。
+定义 p_slip = Σ_足端 1[F_z > 1N]·‖v_foot,xy(世界系)‖²（接触中的足端水平滑移速度平方），函数返回 `[num_envs]` 的非负惩罚量，配置用负权重。静止地面下应惩罚**足端相对地面的世界系速度**，不要误减基座速度；移动平台需减平台速度。当前基类没有保存足端 rigid-body 速度，不能直接假设已有 `self.feet_vel`。
 
 完整改动链：
 
@@ -787,10 +787,10 @@ gap 包括质量/惯量、接触/摩擦、执行器带宽与延迟、传感器�
 假设需求是“ANYmal 带额外载荷仍能跟踪命令，不能明显抖动或摔倒”。第一步先写评估协议：
 
 - 场景：无载荷/目标载荷、前进/侧移/转弯/站立、指令切换、低摩擦及推搡；每个场景固定种子、时长、命令序列。
-- 线速度 RMSE：$\sqrt{\operatorname{mean}((v_x-c_x)^2+(v_y-c_y)^2)}$，单位 m/s；yaw RMSE 单独统计 rad/s。
+- 线速度 RMSE：sqrt( mean( (v_x − c_x)² + (v_y − c_y)² ) )，单位 m/s；yaw RMSE 单独统计 rad/s。
 - 摔倒率：失败终止回合数 / 已结束回合数；timeout 另计。所有候选使用同样观察时长，不能把截短测试当成功。
 - 抖动：动作差平方均值、关节加速度 RMS；滑移：仅接触阶段的足端水平速度均值/P95。
-- 力矩安全：超过软限位/接近硬限位的比例。能耗若用 $\int\sum|\tau\dot q|dt$，需说明只是机械功耗 proxy，不等于电池耗电。
+- 力矩安全：超过软限位/接近硬限位的比例。能耗若用 ∫ Σ|τ·q̇| dt（力矩 × 角速度的积分），需说明只是机械功耗 proxy，不等于电池耗电。
 - 开销：训练环境交互数、墙钟时间、峰值显存、部署推理时延均值/P95/P99和最大值。
 
 **验收条件在实验前定**：例如目标载荷下 RMSE 改善、摔倒率不恶化、无载荷指标在可接受回退范围内。具体阈值来自机器人/业务要求，不凭空规定所有项目都用同一个数。训练 reward 可帮助诊断，但改变奖励权重后不能直接拿它比较交付能力。

@@ -87,16 +87,16 @@ legged_gym（环境） --观测obs/奖励reward--> rsl_rl（PPO算法） --动�
 
 **参考答案：**
 
-MDP（马尔可夫决策过程）= $(\mathcal{S}, \mathcal{A}, P, R, \gamma)$：
+MDP（马尔可夫决策过程）= (S, A, P, R, γ)，五要素：
 
 | 要素 | 本项目实例 |
 |---|---|
-| 状态 $\mathcal{S}$ | 机器人完整物理状态（各刚体位置/速度等），仿真内部维护 |
-| 观测 $\mathcal{O}$（POMDP 视角） | 48 维向量：基座线速度(3) + 角速度(3) + 重力投影(3) + 速度指令(3) + 关节位置(12) + 关节速度(12) + 上一步动作(12)；rough 任务再加 187 维地形高度 = 235 维 |
-| 动作 $\mathcal{A}$ | 12 维连续向量，关节目标位置相对默认站姿的偏移 |
-| 转移 $P$ | PhysX 物理引擎决定（动力学 + 接触） |
-| 奖励 $R$ | 速度跟踪指数奖励 + 姿态/力矩/平滑性惩罚等加权和 |
-| 折扣 $\gamma$ | PPO 配置中 `gamma=0.99` |
+| 状态 S | 机器人完整物理状态（各刚体位置/速度等），仿真内部维护 |
+| 观测 O（POMDP 视角） | 48 维向量：基座线速度(3) + 角速度(3) + 重力投影(3) + 速度指令(3) + 关节位置(12) + 关节速度(12) + 上一步动作(12)；rough 任务再加 187 维地形高度 = 235 维 |
+| 动作 A | 12 维连续向量，关节目标位置相对默认站姿的偏移 |
+| 转移 P | PhysX 物理引擎决定（动力学 + 接触） |
+| 奖励 R | 速度跟踪指数奖励 + 姿态/力矩/平滑性惩罚等加权和 |
+| 折扣 γ | PPO 配置中 `gamma=0.99` |
 
 严格说这是一个 **POMDP**：策略拿不到完整状态（如地面摩擦系数、接触力、真机上的绝对位置），这也是要用域随机化/历史帧等手段补偿的原因之一。
 
@@ -117,25 +117,27 @@ PPO 是 on-policy，本项目代码里体现为 `rsl_rl/rsl_rl/algorithms/ppo.py
 
 策略梯度定理：
 
-$$\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\left[\sum_t \nabla_\theta \log \pi_\theta(a_t|s_t)\, Q^{\pi}(s_t, a_t)\right]$$
+    ∇_θ J(θ) = E [ Σ_t  ∇_θ log π_θ(a_t | s_t) · Q^π(s_t, a_t) ]
 
-直接用回报 $Q$ 的问题是**方差大**：同一状态下所有动作的回报都含一个公共项 $V(s)$，梯度估计噪声大。
+其中 π_θ 是当前策略，E 表示对策略产生的轨迹求期望；含义：让"高回报轨迹中出现过的动作"的概率变大。
 
-引入基线 $b(s)$ 不改变梯度的期望（因为 $\mathbb{E}_{a\sim\pi}[\nabla\log\pi(a|s)\,b(s)] = 0$），但能显著降方差。最自然的基线是状态价值 $V(s)$，于是得到**优势函数**：
+直接用回报 Q 的问题是**方差大**：同一状态下所有动作的回报都含一个公共项 V(s)，梯度估计噪声大。
 
-$$A(s,a) = Q(s,a) - V(s)$$
+引入基线 b(s) 不改变梯度的期望（因为 E[ ∇log π(a|s) · b(s) ] = 0），但能显著降方差。最自然的基线是状态价值 V(s)，于是得到**优势函数**：
 
-直觉：只奖励"比平均水平好"的动作、惩罚"比平均差"的动作。本项目用 GAE 估计 $A$（见 Q12），并在 `compute_returns()` 里对整轮 rollout 做 $(A-\bar A)/(\sigma_A+10^{-8})$ 归一化，进一步稳定更新尺度。
+    A(s, a) = Q(s, a) − V(s)
+
+直觉：只奖励"比平均水平好"的动作、惩罚"比平均差"的动作。本项目用 GAE 估计 A（见 Q12），并在 `compute_returns()` 里对整轮 rollout 做 `(A − mean(A)) / (std(A) + 1e-8)` 归一化，进一步稳定更新尺度。
 
 ### Q7：折扣因子 γ 的作用？γ=0.99 意味着什么？
 
 **参考答案：**
 
-γ 控制未来奖励的重要程度：回报 $G_t=\sum_k \gamma^k r_{t+k}$。
+γ 控制未来奖励的重要程度：回报 G_t = r_t + γ·r_{t+1} + γ²·r_{t+2} + …（k 步之后的奖励按 γ^k 折算）。
 
 - **数学上**：γ<1 保证无限时域下回报有界，值函数收敛；
 - **算法上**：γ 越小，估计方差越小、偏差越大（更"近视"）；γ 越接近 1，目光越远但估计更难；
-- **本项目**：`gamma=0.99`，策略周期 0.02s，有效视野约 $\frac{1}{1-\gamma}=100$ 步 ≈ 2 秒——足够覆盖一个完整步态周期，对行走任务合理。γ 同时改变任务定义本身（智能体优化的是折扣回报），不只是数值技巧。
+- **本项目**：`gamma=0.99`，策略周期 0.02s，有效视野约 1/(1−γ) = 1/0.01 = 100 步 ≈ 2 秒——足够覆盖一个完整步态周期，对行走任务合理。γ 同时改变任务定义本身（智能体优化的是折扣回报），不只是数值技巧。
 
 ---
 
@@ -146,9 +148,11 @@ $$A(s,a) = Q(s,a) - V(s)$$
 
 **参考答案：**
 
-定义概率比 $r_t(\theta)=\dfrac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{old}}(a_t|s_t)}$，PPO-Clip 目标：
+定义概率比 r(θ) = π_新(a_t | s_t) / π_旧(a_t | s_t)（同一个动作，新策略的概率 ÷ 旧策略的概率），PPO-Clip 目标：
 
-$$L^{CLIP}(\theta)=\mathbb{E}_t\left[\min\Big(r_t(\theta)\hat A_t,\ \text{clip}\big(r_t(\theta), 1-\epsilon, 1+\epsilon\big)\hat A_t\Big)\right]$$
+    L(θ) = E [ min( r(θ)·Â,   clip(r(θ), 1−ε, 1+ε)·Â ) ]
+
+即取"未裁剪"与"裁剪到 [1−ε, 1+ε]"两者中更保守的那个。
 
 代码实现（`ppo.py`，注意取了相反数变最小化）：
 
@@ -161,8 +165,8 @@ surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 ```
 
 **保守性来自对"有利方向"的收益截断**：
-- $A>0$（好动作）：ratio 超过 $1+\epsilon$ 后目标不再增长 → 不再奖励继续增大该动作概率；
-- $A<0$（坏动作）：ratio 低于 $1-\epsilon$ 后目标不再增长 → 不再奖励继续压低概率。
+- A > 0（好动作）：ratio 超过 1+ε 后目标不再增长 → 不再奖励继续增大该动作概率；
+- A < 0（坏动作）：ratio 低于 1−ε 后目标不再增长 → 不再奖励继续压低概率。
 
 注意三个常见误区：clip **不直接裁剪动作**、**不限制参数更新幅度**、也**不能严格保证 KL 不超标**（所以本项目还要叠加 KL 自适应学习率，见 Q11）。
 
@@ -184,7 +188,7 @@ surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
 如果每个 epoch 都用当前策略重算分母，ratio 会恒等于 1，clip 完全失效，算法退化成普通策略梯度且失去样本复用的意义。
 
-同样被冻结的还有：采样动作本身、旧价值 $V_{old}$（value clip 用）、旧策略的 μ/σ（算 KL 用）、以及本轮的 GAE 目标。更新的只有**新策略对同一批动作的 log 概率**。
+同样被冻结的还有：采样动作本身、旧价值 V_old（value clip 用）、旧策略的 μ/σ（算 KL 用）、以及本轮的 GAE 目标。更新的只有**新策略对同一批动作的 log 概率**。
 
 ### Q11：本项目如何根据 KL 散度自适应调整学习率？为什么选 KL 作为信号？
 
@@ -192,9 +196,9 @@ surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
 `ppo.py` 的 `update()` 中（`schedule='adaptive'`，`desired_kl=0.01`）：
 
-1. 用对角高斯的**解析 KL 公式**计算 $D_{KL}(\pi_{old}\| \pi_{new})$ 的 batch 均值：
+1. 用对角高斯的**解析 KL 公式**计算 D_KL(π_old ‖ π_new) 的 batch 均值：
 
-$$D_{KL}=\sum_i\left[\log\frac{\sigma_{new}}{\sigma_{old}}+\frac{\sigma_{old}^2+(\mu_{old}-\mu_{new})^2}{2\sigma_{new}^2}-\frac12\right]$$
+        D_KL = Σ_i [ log(σ_new / σ_old)  +  ( σ_old² + (μ_old − μ_new)² ) / (2·σ_new²)  −  1/2 ]
 
 2. 规则：`kl > 2×desired_kl` → 学习率 ÷1.5（下限 1e-5）；`kl < desired_kl/2` → 学习率 ×1.5（上限 1e-2）；写回 Adam 所有参数组。
 
@@ -208,18 +212,21 @@ $$D_{KL}=\sum_i\left[\log\frac{\sigma_{new}}{\sigma_{old}}+\frac{\sigma_{old}^2+
 
 GAE（Generalized Advantage Estimation）是多步 TD 误差的指数加权平均：
 
-$$\delta_t = r_t + \gamma(1-d_t)V(s_{t+1}) - V(s_t)$$
-$$\hat A_t = \delta_t + \gamma\lambda(1-d_t)\hat A_{t+1}, \qquad R_t = \hat A_t + V(s_t)$$
+    δ_t = r_t + γ·(1 − d_t)·V(s_{t+1}) − V(s_t)        ← 单步 TD 误差
+    Â_t = δ_t + γ·λ·(1 − d_t)·Â_{t+1}                  ← 从后往前递推的优势
+    R_t = Â_t + V(s_t)                                 ← Critic 的拟合目标（回报）
+
+其中 d_t 是 done 标志：本步回合真正终止时为 1（未来价值项清零），否则为 0。
 
 代码在 `rsl_rl/rsl_rl/storage/rollout_storage.py` 的 `compute_returns()`，从最后一步**反向递推**（所以必须先算 GAE 再打乱数据，不能先 shuffle 轨迹）。
 
 - **λ（本项目 0.95）**：偏差-方差权衡。
-  - λ=0：退化为单步 TD，$A_t=\delta_t$，完全依赖 Critic → 低方差、高偏差；
+  - λ=0：退化为单步 TD，A_t = δ_t，完全依赖 Critic → 低方差、高偏差；
   - λ=1：接近 Monte Carlo 长程回报 → 低偏差、高方差；
   - 0.95 是常用折中，不是普适最优。
 - **γ（0.99）**：既定义任务（优化折扣回报）又影响估计难度。
 
-另外注意终止处理：**真正失败终止（done=1）不 bootstrap**（$(1-d_t)$ 置零）；**时间截断（timeout）应该 bootstrap**——本项目通过 `send_timeouts=True` 在 `process_env_step()` 中给 timeout 步的奖励补上当前状态的价值估计。
+另外注意终止处理：**真正失败终止（done=1）不 bootstrap**（(1−d_t) 把未来价值项清零）；**时间截断（timeout）应该 bootstrap**——本项目通过 `send_timeouts=True` 在 `process_env_step()` 中给 timeout 步的奖励补上当前状态的价值估计。
 
 ### Q13：PPO 的完整损失函数由哪几项组成？本项目各系数是多少？
 
@@ -243,8 +250,8 @@ loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * 
 
 PPO 对同一批数据做多个 epoch 更新，Critic 可能在少数几步内把价值估计改得面目全非，导致优势目标剧烈漂移、训练不稳。Value clipping：
 
-$$V_{clip} = V_{old} + \text{clip}(V_\theta - V_{old}, -\epsilon, \epsilon)$$
-$$L_V = \mathbb{E}\left[\max\big((V_\theta - R)^2,\ (V_{clip} - R)^2\big)\right]$$
+    V_clip = V_old + clip(V_新 − V_old, −ε, +ε)      ← 限制新价值相对旧价值最多移动 ε
+    L_V = E [ max( (V_新 − R)²,  (V_clip − R)² ) ]   ← 取两种误差中较大的（保守更新）
 
 取两者较大误差 = 保守更新。
 
@@ -336,10 +343,10 @@ rough 任务额外拼接 17×11=187 个机身周围地形高度采样点 → 235
 
 **参考答案：**
 
-动作定义：$q_{des} = q_{default} + s_a \cdot a$，$s_a$=`action_scale=0.5`。
+动作定义：**q_des = q_default + s_a · a**（目标关节角 = 默认站姿角 + 缩放系数 × 网络输出），其中 s_a = `action_scale = 0.5`。
 
 - **直接力矩控制**：策略要从零学"哪个关节该出多大力"，探索空间巨大，初期动作近乎随机抖动，极易摔且难收敛；
-- **位置目标控制**：底层 PD 控制器 $\tau = K_p(q_{des}-q) - K_d\dot q$ 已提供稳定性（类似生物的脊髓反射），策略只需在默认站姿附近学偏移，搜索空间小、天然平滑、易收敛。
+- **位置目标控制**：底层 PD 控制器 **τ = Kp·(q_des − q) − Kd·q̇**（力矩 = 位置误差 × 刚度 − 关节速度 × 阻尼）已提供稳定性（类似生物的脊髓反射），策略只需在默认站姿附近学偏移，搜索空间小、天然平滑、易收敛。
 
 代价是性能上限依赖执行器模型精度。本项目两条路径：A1 等用理想 PD；ANYmal 系列用**预训练执行器网络**（LSTM，建模 ANYDrive SEA 电机的真实响应）替代理想 PD，减小 sim-to-real 的执行器误差。
 
@@ -360,7 +367,7 @@ rough 任务额外拼接 17×11=187 个机身周围地形高度采样点 → 235
 
 | 奖励项 | 权重 | 作用 |
 |---|---|---|
-| `tracking_lin_vel` | +1.0 | **主任务**：$\exp(-\|v_{xy}-v_{cmd}\|^2/\sigma)$ 指数型速度跟踪 |
+| `tracking_lin_vel` | +1.0 | **主任务**：exp( −‖v_xy − v_cmd‖² / σ ) 指数型速度跟踪，跟踪越准奖励越接近 1 |
 | `tracking_ang_vel` | +0.5 | yaw 角速度跟踪 |
 | `lin_vel_z` | −2.0 | 抑制上下跳动 |
 | `ang_vel_xy` | −0.05 | 保持机身平稳 |
@@ -385,8 +392,8 @@ rough 任务额外拼接 17×11=187 个机身周围地形高度采样点 → 235
 `check_termination()`：基座等指定部位接触力 >1N（摔倒）**或** `episode_length > max_episode_length`（20s）→ reset。
 
 **必须区分的原因在于价值 bootstrap**：
-- 失败终止：真实到达终止状态，$V(s_{terminal})=0$，TD 目标不 bootstrap；
-- 超时终止：任务本身没完，是人为截断，**应该用 $V(s_{t+1})$ 自举**，否则 Critic 会学到"活到 20 秒边缘的状态价值为 0"，策略在回合末尾行为退化。
+- 失败终止：真实到达终止状态，V(终止状态) = 0，TD 目标不 bootstrap；
+- 超时终止：任务本身没完，是人为截断，**应该用 V(s_{t+1}) 自举**，否则 Critic 会学到"活到 20 秒边缘的状态价值为 0"，策略在回合末尾行为退化。
 
 本项目通过 `send_timeouts=True` 把 `time_outs` 传给算法，在 `process_env_step()` 中对 timeout 步用当前价值补偿。工程上两者还要分开统计——timeout 不是摔倒，混为一谈会误判策略水平。
 
@@ -666,20 +673,20 @@ def compute_gae(rewards, values, dones, last_value, gamma=0.99, lam=0.95):
 
 **参考答案：**
 
-两个对角高斯 $\pi_{old}=\mathcal N(\mu_o, \sigma_o^2)$、$\pi_{new}=\mathcal N(\mu_n, \sigma_n^2)$，逐维：
+两个对角高斯 π_old = N(μ_o, σ_o²)、π_new = N(μ_n, σ_n²)（均值 μ、标准差 σ，每个动作维度一个独立高斯），逐维：
 
-$$D_{KL}(\pi_{old}\|\pi_{new}) = \sum_i \left[\log\frac{\sigma_n}{\sigma_o} + \frac{\sigma_o^2 + (\mu_o-\mu_n)^2}{2\sigma_n^2} - \frac{1}{2}\right]$$
+    D_KL(π_old ‖ π_new) = Σ_i [ log(σ_n / σ_o)  +  ( σ_o² + (μ_o − μ_n)² ) / (2·σ_n²)  −  1/2 ]
 
-代码（`ppo.py` 自适应分支）与此逐项对应，对 batch 取均值后与 `desired_kl=0.01` 比较调速。要点：① 方向是 $KL(old\|new)$；② 这是解析解，不需要采样估计；③ 各维求和，不是取平均。
+代码（`ppo.py` 自适应分支）与此逐项对应，对 batch 取均值后与 `desired_kl=0.01` 比较调速。要点：① 方向是 KL(old ‖ new)；② 这是解析解，不需要采样估计；③ 各维求和，不是取平均。
 
 ### Q43：计算题——4096 环境、每环境 24 步、5 epoch、4 minibatch。一次迭代的样本数、每次梯度更新的 batch、总共多少次梯度更新？若每秒 20 万步采样，一次迭代采样耗时多少？
 
 **参考答案：**
 
-- 总样本 $B = 4096 \times 24 = 98304$；
-- minibatch 大小 $= 98304 / 4 = 24576$；
-- 梯度更新次数 $= 5 \times 4 = 20$ 次；
-- 采样耗时 $= 98304 / 200000 \approx 0.49$ 秒。
+- 总样本 B = 4096 × 24 = 98,304；
+- minibatch 大小 = 98,304 / 4 = 24,576；
+- 梯度更新次数 = 5 × 4 = 20 次；
+- 采样耗时 = 98,304 / 200,000 ≈ 0.49 秒。
 
 追问：这些数据**不能跨迭代复用**（on-policy），每次迭代重新采集——再次强调采样吞吐的意义。
 
@@ -687,9 +694,13 @@ $$D_{KL}(\pi_{old}\|\pi_{new}) = \sum_i \left[\log\frac{\sigma_n}{\sigma_o} + \f
 
 **参考答案：**
 
-$$\mathbb{E}_{a\sim\pi_\theta}\left[\nabla_\theta \log \pi_\theta(a|s)\, b(s)\right] = b(s)\sum_a \pi_\theta(a|s)\nabla_\theta \log\pi_\theta(a|s) = b(s)\sum_a \nabla_\theta \pi_\theta(a|s) = b(s)\,\nabla_\theta \underbrace{\sum_a \pi_\theta(a|s)}_{=1} = 0$$
+    E_a~π [ ∇_θ log π_θ(a|s) · b(s) ]
+      = b(s) · Σ_a π_θ(a|s) · ∇_θ log π_θ(a|s)      ← b(s) 不依赖动作，可提出期望
+      = b(s) · Σ_a ∇_θ π_θ(a|s)                     ← log 求导技巧：π·∇log π = ∇π
+      = b(s) · ∇_θ ( Σ_a π_θ(a|s) )                 ← 求和与求导交换次序
+      = b(s) · ∇_θ ( 1 ) = 0                        ← 所有动作的概率之和恒为 1
 
-关键步骤用了 **log-derivative trick**：$\pi \nabla \log\pi = \nabla\pi$。所以加任何只依赖状态（不依赖动作）的基线都不引入偏差，但可降方差——这就是 Actor-Critic 用 $V(s)$ 当基线的理论依据。
+关键步骤用了 **log-derivative trick**：π·∇log π = ∇π。所以加任何只依赖状态（不依赖动作）的基线都不引入偏差，但可降方差——这就是 Actor-Critic 用 V(s) 当基线的理论依据。
 
 ### Q45：RolloutStorage 的张量为什么组织成 `[T, num_envs, dim]`（时间维在前）而不是 `[num_envs, T, dim]`？
 
@@ -710,7 +721,7 @@ $$\mathbb{E}_{a\sim\pi_\theta}\left[\nabla_\theta \log \pi_\theta(a|s)\, b(s)\ri
 | 为什么不用 SAC？ | on-policy PPO 与大规模并行采样契合，稳定可复现；SAC 对高维机器人状态的 replay buffer 工程更重 |
 | 观测里为什么放上一帧动作？ | 提供动作时序信息，帮助平滑输出、感知延迟 |
 | std 是网络输出的吗？ | 不是，是与状态无关的可学习参数（12 维） |
-| 训练 300 次迭代总交互步数？ | $300 \times 98304 \approx 2.95\times10^7$ 步 |
+| 训练 300 次迭代总交互步数？ | 300 × 98,304 ≈ 2.95×10⁷（约 2950 万）步 |
 | 熵系数为 0 会怎样？ | std 可能过早崩塌，策略陷入局部最优 |
 | value loss 一直很大是发散吗？ | 不一定——回报目标随策略改进在移动，重点看是否 NaN/爆炸 |
 | play.py 能当正式评估吗？ | 不能，它是定性回放（改了噪声/地形等配置），正式评估需固定工况、固定种子、原始指标 |
